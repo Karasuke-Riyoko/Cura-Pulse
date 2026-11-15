@@ -169,6 +169,7 @@ export default function LoginPage() {
   const role: Role = tab === "staff" ? staffRole : tab;
 
   const switchTab = (t: Tab) => {
+    demoAuto.current = false;
     setTab(t);
     setError(null);
     setCode("");
@@ -433,43 +434,19 @@ export default function LoginPage() {
     }
   };
 
-  /** One click: fill and continue through every step until there is something to look at. */
+  /** One click turns on demo mode: every later step is filled as it opens, but the person still presses each button. */
   const demoAuto = useRef(false);
-  const stepAction = useRef<() => void>(() => undefined);
-  stepAction.current = () => {
-    if (step === "details") submitDetails();
-    else if (step === "staffCreds") void staffContinue();
-    else if (step === "method") void requestCode();
-    else if (step === "code") void checkCode();
-    else if (step === "professional") {
-      if (file) void runAiCheck();
-      else window.setTimeout(() => stepAction.current(), 300); // certificate still loading
-    } else demoAuto.current = false;
-  };
   useEffect(() => {
-    if (!demoAuto.current || busy) return;
-    if (step === "code" && !codeIsDemo) {
-      demoAuto.current = false; // real email code: the person types it
-      return;
-    }
-    if (step === "review" || step === "pending") {
-      demoAuto.current = false; // stop so the AI review can be read before sending
-      return;
-    }
+    if (!demoAuto.current) return;
+    if (step === "code" && !codeIsDemo) return; // real email code: the person types it
     fillStep(step);
-    const t = window.setTimeout(() => stepAction.current(), 450);
-    return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
-  useEffect(() => {
-    if (error) demoAuto.current = false;
-  }, [error]);
+  }, [step, codeIsDemo]);
 
   const fillDemo = () => {
     setError(null);
     demoAuto.current = true;
     fillStep(step);
-    window.setTimeout(() => stepAction.current(), 450);
   };
   const canFillDemo = step === "details" || step === "staffCreds" || step === "method" || step === "professional" || (step === "code" && codeIsDemo);
 
@@ -592,7 +569,7 @@ export default function LoginPage() {
 
           {canFillDemo && (
             <button type="button" onClick={fillDemo} className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-lav/60 px-3 py-1 text-[12.5px] font-semibold text-lav-ink hover:bg-lav">
-              <Sparkles className="h-3.5 w-3.5" /> Fill demo details &amp; continue
+              <Sparkles className="h-3.5 w-3.5" /> Fill demo details
             </button>
           )}
           {error && (
