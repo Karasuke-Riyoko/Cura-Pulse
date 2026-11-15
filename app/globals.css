@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --cp-canvas: #f7faf8;
+  --cp-ink: #263746;
+}
+
+html,
+body {
+  background: var(--cp-canvas);
+  color: var(--cp-ink);
+}
+
+body {
+  font-family: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-brand {
+  font-variation-settings: "SOFT" 50, "WONK" 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thin, quiet scrollbars inside the phone frame and panels */
+.cp-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.cp-scroll::-webkit-scrollbar-thumb {
+  background: #c3d0cb;
+  border-radius: 999px;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}

@@ -1,0 +1,31 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Next.js build output
+/.next/
+/out/
+/build
+
+# Environment files
+.env*.local
+.env
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS and Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary capture scripts
+capture_*.js
+snap.js
+debug_page.js
+
+.vercel

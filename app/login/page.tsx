@@ -1,0 +1,721 @@
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, BadgeCheck, FileUp, KeyRound, Mail, ShieldCheck, Smartphone, Sparkles, Stethoscope, User, UserCog } from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import {
+  DEMO_DOCTOR,
+  DEMO_PHONE_OTP,
+  HOME_OF,
+  Role,
+  Session,
+  Sex,
+  fullName,
+  isEmail,
+  phoneDigits,
+  readSession,
+  saveProfileRow,
+  sendCode,
+  verifyCode,
+  writeSession,
+} from "@/lib/auth";
+import { Alert, Badge, Button, ChoiceChip, Field, cx, inputCls, inputErrCls } from "@/components/ui";
+
+type Tab = "patient" | "doctor" | "staff";
+type Step = "details" | "method" | "code" | "professional" | "review" | "pending" | "staffCreds";
+type Mode = "signup" | "login";
+
+interface DocReview {
+  verdict: "LOOKS_VALID" | "NEEDS_ATTENTION" | "UNREADABLE";
+  document_type: string;
+  extracted: { name: string; registration_number: string; council_or_university: string; issue_date: string; expiry_date: string };
+  issues: string[];
+  summary: string;
+  source: "gemini" | "offline";
+}
+
+const ACCOUNTS_KEY = "curapulse_accounts";
+const APPS_KEY = "curapulse_doctor_applications";
+const COUNCILS = ["National Medical Commission (NMC)", "Delhi Medical Council", "Maharashtra Medical Council", "Karnataka Medical Council", "Tamil Nadu Medical Council", "West Bengal Medical Council", "Other State Medical Council"];
+
+/** Local copy of who signed up with which email/phone, so "Log in" can find the name again on this device. */
+function rememberAccount(s: Session) {
+  try {
+    const all = JSON.parse(window.localStorage.getItem(ACCOUNTS_KEY) || "{}");
+    all[`${s.role}:${s.contact.toLowerCase()}`] = { firstName: s.firstName, surname: s.surname, age: s.age, sex: s.sex, doctorAppId: s.doctorAppId, doctorStatus: s.doctorStatus };
+    window.localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(all));
+  } catch {
+    /* ignore */
+  }
+}
+function recallAccount(role: Role, contact: string): Partial<Session> | null {
+  try {
+    const all = JSON.parse(window.localStorage.getItem(ACCOUNTS_KEY) || "{}");
+    return all[`${role}:${contact.toLowerCase()}`] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  const [tab, setTab] = useState<Tab>("patient");
+  const [mode, setMode] = useState<Mode>("signup");
+  const [step, setStep] = useState<Step>("details");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const [firstName, setFirstName] = useState("");
+  const [surname, setSurname] = useState("");
+  const [age, setAge] = useState("");
+  const [sex, setSex] = useState<Sex | "">("");
+
+  const [method, setMethod] = useState<"email" | "phone">("email");
+  const [contact, setContact] = useState("");
+  const [code, setCode] = useState("");
+  const [codeIsDemo, setCodeIsDemo] = useState(false);
+  const [resendIn, setResendIn] = useState(0);
+  const verified = useRef<{ userId: string; real: boolean } | null>(null);
+
+  const [qualification, setQualification] = useState("");
+  const [specialty, setSpecialty] = useState("");
+  const [regNo, setRegNo] = useState("");
+  const [council, setCouncil] = useState(COUNCILS[0]);
+  const [experience, setExperience] = useState("");
+  const [hospital, setHospital] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [extraNote, setExtraNote] = useState("");
+  const [review, setReview] = useState<DocReview | null>(null);
+  const [appId, setAppId] = useState("");
+
+  const [staffRole, setStaffRole] = useState<"support" | "admin">("support");
+  const [staffId, setStaffId] = useState("");
+  const [staffPass, setStaffPass] = useState("");
+  const staffInfo = useRef<{ firstName: string; surname: string; staffId: string } | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+    const q = new URLSearchParams(window.location.search).get("role");
+    const want = (["patient", "doctor", "support", "admin"] as Role[]).includes(q as Role) ? (q as Role) : "patient";
+    const s = readSession(want);
+    if (s) {
+      router.replace(HOME_OF[s.role]);
+      return;
+    }
+    if (q === "doctor") setTab("doctor");
+    if (q === "support" || q === "admin") {
+      setTab("staff");
+      setStaffRole(q);
+      setStep("staffCreds");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = setTimeout(() => setResendIn((n) => n - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendIn]);
+
+  const role: Role = tab === "staff" ? staffRole : tab;
+
+  const switchTab = (t: Tab) => {
+    setTab(t);
+    setError(null);
+    setCode("");
+    setMode("signup");
+    staffInfo.current = null;
+    setStep(t === "staff" ? "staffCreds" : "details");
+  };
+
+  const submitDetails = () => {
+    const ageN = Number(age);
+    if (firstName.trim().length < 2) return setError("Enter your name.");
+    if (!age || !Number.isFinite(ageN) || ageN < 1 || ageN > 120) return setError("Enter a valid age.");
+    if (tab === "doctor" && ageN < 22) return setError("Doctors must be at least 22.");
+    if (!sex) return setError("Select your sex.");
+    setError(null);
+    setStep("method");
+  };
+
+  const requestCode = async () => {
+    const c = contact.trim();
+    if (method === "email" && !isEmail(c)) return setError("Enter a valid email address.");
+    if (method === "phone" && phoneDigits(c).length < 10) return setError("Enter a 10-digit mobile number.");
+    setError(null);
+    setBusy(true);
+    const res = await sendCode(method, c, { first_name: firstName.trim(), surname: surname.trim(), age, sex, role });
+    setBusy(false);
+    if (!res.ok) return setError(res.error ?? "Could not send the code.");
+    setCodeIsDemo(res.demo);
+    setCode("");
+    setResendIn(30);
+    setStep("code");
+  };
+
+  const finishSession = (s: Session) => {
+    writeSession(s);
+    rememberAccount(s);
+    void saveProfileRow(s);
+    router.replace(HOME_OF[s.role]);
+  };
+
+  const baseSession = (r: Role, userId: string): Session => ({
+    role: r,
+    userId,
+    firstName: firstName.trim(),
+    surname: surname.trim(),
+    age: age.trim(),
+    sex,
+    method,
+    contact: contact.trim(),
+    verifiedBy: verified.current?.real ? "real" : "demo",
+    signedInAt: new Date().toISOString(),
+  });
+
+  const checkCode = async () => {
+    if (code.replace(/\D/g, "").length !== 6) return setError("Enter the 6-digit code.");
+    setError(null);
+    setBusy(true);
+    const res = await verifyCode(method, contact, code);
+    if (!res.ok || !res.userId) {
+      setBusy(false);
+      return setError(res.error ?? "That code is not right.");
+    }
+    let meta: Record<string, unknown> | undefined;
+    if (method === "email") {
+      try {
+        const { data } = await supabase.auth.getUser();
+        meta = data.user?.user_metadata ?? undefined;
+      } catch {
+        meta = undefined;
+      }
+    }
+    setBusy(false);
+    verified.current = { userId: res.userId, real: method === "email" };
+
+    if (tab === "staff" && staffInfo.current) {
+      return finishSession({
+        role: staffRole,
+        userId: res.userId,
+        firstName: staffInfo.current.firstName,
+        surname: staffInfo.current.surname,
+        age: "",
+        sex: "",
+        method,
+        contact: contact.trim(),
+        verifiedBy: method === "email" ? "real" : "demo",
+        staffId: staffInfo.current.staffId,
+        signedInAt: new Date().toISOString(),
+      });
+    }
+
+    if (mode === "login") {
+      const saved = recallAccount(role, contact.trim());
+      const fn = String(saved?.firstName ?? meta?.first_name ?? "");
+      if (!fn) {
+        setMode("signup");
+        setStep("details");
+        setError("We couldn't find your details. Fill them in once and you're done.");
+        return;
+      }
+      setFirstName(fn);
+      setSurname(String(saved?.surname ?? meta?.surname ?? ""));
+      setAge(String(saved?.age ?? meta?.age ?? ""));
+      setSex((saved?.sex ?? meta?.sex ?? "") as Sex | "");
+      if (role === "doctor" && !saved?.doctorAppId) {
+        setStep("professional");
+        return;
+      }
+      return finishSession({
+        role,
+        userId: res.userId,
+        firstName: fn,
+        surname: String(saved?.surname ?? meta?.surname ?? ""),
+        age: String(saved?.age ?? meta?.age ?? ""),
+        sex: (saved?.sex ?? meta?.sex ?? "") as Sex | "",
+        method,
+        contact: contact.trim(),
+        verifiedBy: method === "email" ? "real" : "demo",
+        doctorAppId: saved?.doctorAppId,
+        doctorStatus: saved?.doctorStatus,
+        signedInAt: new Date().toISOString(),
+      });
+    }
+
+    if (tab === "doctor") return setStep("professional");
+    finishSession(baseSession("patient", res.userId));
+  };
+
+  const runAiCheck = async () => {
+    if (qualification.trim().length < 2) return setError("Enter your qualification, for example MBBS, MD.");
+    if (specialty.trim().length < 2) return setError("Enter your specialty.");
+    if (regNo.trim().length < 4) return setError("Enter your medical registration number.");
+    if (!experience || Number(experience) > 60) return setError("Enter your years of experience.");
+    if (!file) return setError("Upload your degree or registration certificate.");
+    if (file.size > 4 * 1024 * 1024) return setError("The file is larger than 4 MB. Upload a smaller scan.");
+    setError(null);
+    setBusy(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("fullName", fullName({ firstName, surname }));
+    fd.append("registrationNo", regNo.trim());
+    fd.append("council", council);
+    fd.append("qualification", qualification.trim());
+    try {
+      const res = await fetch("/api/verify-doctor-doc", { method: "POST", body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Check failed");
+      setReview(json as DocReview);
+    } catch (e) {
+      setReview({
+        verdict: "NEEDS_ATTENTION",
+        document_type: "Not analysed",
+        extracted: { name: "", registration_number: "", council_or_university: "", issue_date: "", expiry_date: "" },
+        issues: [`AI check could not run (${e instanceof Error ? e.message : "network"}). Support will review the file by hand.`],
+        summary: "",
+        source: "offline",
+      });
+    }
+    setBusy(false);
+    setStep("review");
+  };
+
+  const doctorFirst = () => (firstName.trim().toLowerCase().startsWith("dr") ? firstName.trim() : `Dr. ${firstName.trim()}`);
+
+  const submitApplication = async () => {
+    if (!verified.current) return;
+    setBusy(true);
+    const id = `APP-${Date.now().toString().slice(-6)}`;
+    const record = {
+      id,
+      user_id: verified.current.userId,
+      full_name: fullName({ firstName: doctorFirst(), surname }),
+      email: method === "email" ? contact.trim() : "",
+      phone: method === "phone" ? contact.trim() : "",
+      age: Number(age),
+      sex,
+      nmc_registration_id: regNo.trim(),
+      state_medical_council: council,
+      degree: qualification.trim(),
+      specialty: specialty.trim(),
+      experience_years: Number(experience),
+      hospital_affiliation: hospital.trim() || "Not provided",
+      notes: extraNote.trim(),
+      documents: file ? [file.name] : [],
+      ai_review: review,
+      submitted_at: new Date().toISOString(),
+      verification_status: "PENDING",
+    };
+    try {
+      const prev = JSON.parse(window.localStorage.getItem(APPS_KEY) || "[]");
+      window.localStorage.setItem(APPS_KEY, JSON.stringify([record, ...(Array.isArray(prev) ? prev : [])].slice(0, 30)));
+    } catch {
+      /* ignore */
+    }
+    try {
+      await supabase.from("doctor_applications").insert([record]);
+    } catch {
+      /* local copy is enough for the demo */
+    }
+    const s: Session = { ...baseSession("doctor", verified.current.userId), firstName: doctorFirst(), doctorAppId: id, doctorStatus: "PENDING" };
+    writeSession(s);
+    rememberAccount(s);
+    void saveProfileRow(s);
+    setBusy(false);
+    setAppId(id);
+    setStep("pending");
+  };
+
+  const useDemoDoctor = () => {
+    writeSession({ ...DEMO_DOCTOR, signedInAt: new Date().toISOString() });
+    router.replace("/doctor");
+  };
+
+  const staffContinue = async () => {
+    if (!staffId.trim() || !staffPass) return setError("Enter your staff ID and password.");
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await fetch("/api/staff-login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: staffId, password: staffPass, role: staffRole }) });
+      const json = await res.json();
+      setBusy(false);
+      if (!res.ok || !json.ok) return setError(json.error || "Staff ID or password is wrong.");
+      staffInfo.current = { firstName: json.firstName, surname: json.surname, staffId: json.staffId };
+      setMethod("email");
+      setContact("");
+      setStep("method");
+    } catch {
+      setBusy(false);
+      setError("Can't reach the server. Check your connection.");
+    }
+  };
+
+  const back = () => {
+    setError(null);
+    if (step === "method") {
+      if (tab === "staff") return setStep("staffCreds");
+      setMode("signup");
+      return setStep("details");
+    }
+    if (step === "code") return setStep("method");
+    if (step === "review") return setStep("professional");
+    if (step === "professional") return setStep("method");
+    setStep("details");
+  };
+
+  const steps: Step[] = tab === "doctor" ? ["details", "method", "code", "professional", "review"] : tab === "patient" ? ["details", "method", "code"] : ["staffCreds", "method", "code"];
+  const stepIdx = Math.max(0, steps.indexOf(step));
+  const showBack = step !== "details" && step !== "staffCreds" && step !== "pending";
+
+  const title =
+    step === "details"
+      ? tab === "doctor"
+        ? "Join as a doctor"
+        : "Create your account"
+      : step === "method"
+        ? tab === "staff"
+          ? "Confirm it's you"
+          : mode === "login"
+            ? "Log in"
+            : "How should we reach you?"
+        : step === "code"
+          ? "Enter the code"
+          : step === "professional"
+            ? "Your medical credentials"
+            : step === "review"
+              ? "AI document check"
+              : step === "pending"
+                ? "Application sent"
+                : staffRole === "admin"
+                  ? "Admin sign-in"
+                  : "Support Desk sign-in";
+
+  if (!mounted) return <div className="min-h-screen bg-canvas" />;
+
+  return (
+    <div className="min-h-screen bg-canvas px-4 py-6 sm:py-10">
+      <div className="mx-auto w-full max-w-md">
+        <div className="mb-5 flex items-center justify-center gap-2">
+          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand text-white">
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M3 12h4l2-5 4 10 2-5h6" />
+            </svg>
+          </span>
+          <span className="font-brand text-[26px] font-semibold text-ink">CuraPulse</span>
+        </div>
+
+        <div className="mb-4 grid grid-cols-3 gap-1 rounded-2xl border border-line bg-white p-1" role="tablist" aria-label="Sign in as">
+          {(
+            [
+              ["patient", "Patient", <User key="p" className="h-4 w-4" />],
+              ["doctor", "Doctor", <Stethoscope key="d" className="h-4 w-4" />],
+              ["staff", "Staff", <UserCog key="s" className="h-4 w-4" />],
+            ] as [Tab, string, React.ReactNode][]
+          ).map(([k, label, icon]) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              aria-selected={tab === k}
+              onClick={() => switchTab(k)}
+              className={cx("flex h-10 items-center justify-center gap-1.5 rounded-xl text-[14px] font-semibold transition", tab === k ? "bg-brand text-white" : "text-ink-muted hover:bg-canvas")}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="rounded-3xl border border-line bg-white p-5 shadow-sm sm:p-6">
+          <div className="mb-4">
+            {showBack && (
+              <button type="button" onClick={back} className="mb-3 flex items-center gap-1 text-[14px] font-semibold text-brand">
+                <ArrowLeft className="h-4 w-4" /> Back
+              </button>
+            )}
+            <h1 className="text-[24px] font-bold leading-tight text-ink">{title}</h1>
+            {step !== "pending" && mode === "signup" && (
+              <div className="mt-3 flex gap-1.5" aria-hidden>
+                {steps.map((s, i) => (
+                  <span key={s} className={cx("h-1.5 flex-1 rounded-full", i <= stepIdx ? "bg-brand" : "bg-line")} />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {error && (
+            <Alert tone="crit" className="mb-4">
+              {error}
+            </Alert>
+          )}
+
+          {step === "details" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Name" htmlFor="fn">
+                  <input id="fn" autoComplete="given-name" value={firstName} onChange={(e) => setFirstName(e.target.value)} className={inputCls} placeholder={tab === "doctor" ? "Meera" : "Aisha"} />
+                </Field>
+                <Field label={<span>Surname <span className="font-normal text-ink-soft">(optional)</span></span>} htmlFor="sn">
+                  <input id="sn" autoComplete="family-name" value={surname} onChange={(e) => setSurname(e.target.value)} className={inputCls} />
+                </Field>
+              </div>
+              <Field label="Age" htmlFor="age">
+                <input id="age" inputMode="numeric" value={age} onChange={(e) => setAge(e.target.value.replace(/\D/g, "").slice(0, 3))} className={cx(inputCls, "max-w-[120px]")} />
+              </Field>
+              <div>
+                <p className="mb-1.5 text-[14px] font-semibold text-ink">Sex</p>
+                <div className="flex flex-wrap gap-2">
+                  {(["Female", "Male", "Other"] as Sex[]).map((s) => (
+                    <ChoiceChip key={s} on={sex === s} onClick={() => setSex(s)}>
+                      {s}
+                    </ChoiceChip>
+                  ))}
+                </div>
+                {tab === "patient" && sex === "Female" && <p className="mt-2 text-[13px] text-ink-muted">You'll also get women-rated doctors and a female-doctors-only search.</p>}
+              </div>
+              <Button full onClick={submitDetails}>
+                Continue
+              </Button>
+              <p className="text-center text-[14px] text-ink-muted">
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  className="font-semibold text-brand"
+                  onClick={() => {
+                    setError(null);
+                    setMode("login");
+                    setStep("method");
+                  }}
+                >
+                  Log in
+                </button>
+              </p>
+              {tab === "doctor" && (
+                <div className="border-t border-line pt-4">
+                  <Button full variant="tertiary" icon={<Sparkles className="h-4 w-4" />} onClick={useDemoDoctor}>
+                    Use demo doctor account (already verified)
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {step === "staffCreds" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <ChoiceChip on={staffRole === "support"} onClick={() => setStaffRole("support")}>
+                  Support Desk
+                </ChoiceChip>
+                <ChoiceChip on={staffRole === "admin"} onClick={() => setStaffRole("admin")}>
+                  Admin
+                </ChoiceChip>
+              </div>
+              <Field label="Staff ID" htmlFor="sid">
+                <input id="sid" autoComplete="username" value={staffId} onChange={(e) => setStaffId(e.target.value)} className={inputCls} placeholder={staffRole === "admin" ? "admin01" : "support01"} />
+              </Field>
+              <Field label="Password" htmlFor="spw">
+                <input id="spw" type="password" autoComplete="current-password" value={staffPass} onChange={(e) => setStaffPass(e.target.value)} className={inputCls} onKeyDown={(e) => e.key === "Enter" && staffContinue()} />
+              </Field>
+              <Button full icon={<KeyRound className="h-4 w-4" />} loading={busy} onClick={staffContinue}>
+                Continue
+              </Button>
+              <p className="text-[13px] text-ink-muted">Staff accounts are created by CuraPulse in advance. After the password you confirm with a one-time code.</p>
+            </div>
+          )}
+
+          {step === "method" && (
+            <div className="space-y-4">
+              {tab === "staff" && staffInfo.current && <Badge tone="ok">Password correct · {staffInfo.current.firstName}</Badge>}
+              <div className="grid grid-cols-2 gap-2">
+                {(["email", "phone"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    aria-pressed={method === m}
+                    onClick={() => {
+                      setMethod(m);
+                      setContact("");
+                      setError(null);
+                    }}
+                    className={cx("flex flex-col items-center gap-1 rounded-2xl border p-3 text-[14px] font-semibold", method === m ? "border-brand bg-sage/50 text-brand" : "border-line text-ink-muted")}
+                  >
+                    {m === "email" ? <Mail className="h-5 w-5" /> : <Smartphone className="h-5 w-5" />}
+                    {m === "email" ? "Email" : "Phone"}
+                  </button>
+                ))}
+              </div>
+              <Field
+                label={method === "email" ? "Email address" : "Mobile number"}
+                htmlFor="contact"
+                help={method === "phone" ? `Demo mode: SMS isn't connected yet, so the code is ${DEMO_PHONE_OTP}.` : "We'll email you a 6-digit code."}
+              >
+                <input
+                  id="contact"
+                  type={method === "email" ? "email" : "tel"}
+                  inputMode={method === "email" ? "email" : "tel"}
+                  autoComplete={method === "email" ? "email" : "tel"}
+                  placeholder={method === "email" ? "you@example.com" : "+91 98xxx xxxxx"}
+                  value={contact}
+                  onChange={(e) => setContact(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && requestCode()}
+                  className={cx(inputCls, error && inputErrCls)}
+                />
+              </Field>
+              <Button full loading={busy} onClick={requestCode}>
+                Send code
+              </Button>
+            </div>
+          )}
+
+          {step === "code" && (
+            <div className="space-y-4">
+              <p className="text-[14.5px] text-ink-muted">
+                {codeIsDemo ? (
+                  <>
+                    Demo code for <b className="text-ink">{contact}</b>: enter <b className="text-ink">{DEMO_PHONE_OTP}</b>.
+                  </>
+                ) : (
+                  <>
+                    We emailed a 6-digit code to <b className="text-ink">{contact}</b>. Check spam if you don't see it.
+                  </>
+                )}
+              </p>
+              <input
+                aria-label="6-digit code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                placeholder="••••••"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onKeyDown={(e) => e.key === "Enter" && checkCode()}
+                className={cx(inputCls, "tabular text-center text-[24px] tracking-[0.5em]", error && inputErrCls)}
+              />
+              <Button full loading={busy} onClick={checkCode} icon={<ShieldCheck className="h-4 w-4" />}>
+                Verify
+              </Button>
+              <div className="flex items-center justify-between text-[14px]">
+                <button type="button" className="font-semibold text-brand disabled:text-ink-soft" disabled={resendIn > 0 || busy} onClick={requestCode}>
+                  {resendIn > 0 ? `Resend in ${resendIn}s` : "Resend code"}
+                </button>
+                <button type="button" className="font-semibold text-ink-muted" onClick={() => setStep("method")}>
+                  Change {method === "email" ? "email" : "number"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === "professional" && (
+            <div className="space-y-4">
+              <Badge tone="ok">{method === "email" ? "Email" : "Phone"} verified</Badge>
+              <Field label="Qualification" htmlFor="q">
+                <input id="q" value={qualification} onChange={(e) => setQualification(e.target.value)} className={inputCls} placeholder="MBBS, MD (General Medicine)" />
+              </Field>
+              <Field label="Specialty" htmlFor="sp">
+                <input id="sp" value={specialty} onChange={(e) => setSpecialty(e.target.value)} className={inputCls} placeholder="General Medicine" />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Registration no." htmlFor="rn">
+                  <input id="rn" value={regNo} onChange={(e) => setRegNo(e.target.value)} className={inputCls} placeholder="DMC/R/2019/11873" />
+                </Field>
+                <Field label="Experience (years)" htmlFor="ex">
+                  <input id="ex" inputMode="numeric" value={experience} onChange={(e) => setExperience(e.target.value.replace(/\D/g, "").slice(0, 2))} className={inputCls} />
+                </Field>
+              </div>
+              <Field label="Medical council" htmlFor="mc">
+                <select id="mc" value={council} onChange={(e) => setCouncil(e.target.value)} className={inputCls}>
+                  {COUNCILS.map((c) => (
+                    <option key={c}>{c}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label={<span>Hospital or clinic <span className="font-normal text-ink-soft">(optional)</span></span>} htmlFor="hp">
+                <input id="hp" value={hospital} onChange={(e) => setHospital(e.target.value)} className={inputCls} />
+              </Field>
+              <div>
+                <p className="mb-1.5 text-[14px] font-semibold text-ink">Degree or registration certificate</p>
+                <label className={cx("flex cursor-pointer items-center gap-3 rounded-2xl border border-dashed p-4", file ? "border-brand bg-sage/40" : "border-line hover:bg-canvas")}>
+                  <FileUp className="h-6 w-6 shrink-0 text-brand" />
+                  <span className="min-w-0 text-[14px]">
+                    <span className="block truncate font-semibold text-ink">{file ? file.name : "Upload PDF or photo"}</span>
+                    <span className="text-ink-muted">{file ? `${(file.size / 1024).toFixed(0)} KB` : "PDF, JPG or PNG, up to 4 MB"}</span>
+                  </span>
+                  <input aria-label="Certificate file" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" className="sr-only" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+                </label>
+              </div>
+              <Field label={<span>Anything else for the reviewers <span className="font-normal text-ink-soft">(optional)</span></span>} htmlFor="nt">
+                <textarea id="nt" rows={3} value={extraNote} onChange={(e) => setExtraNote(e.target.value)} className={cx(inputCls, "h-auto py-2")} placeholder="Prior experience, fellowships, other certificates" />
+              </Field>
+              <Button full loading={busy} onClick={runAiCheck}>
+                {busy ? "AI is reading your document…" : "Check document"}
+              </Button>
+            </div>
+          )}
+
+          {step === "review" && review && (
+            <div className="space-y-4">
+              <Alert
+                tone={review.verdict === "LOOKS_VALID" ? "ok" : "warn"}
+                title={review.verdict === "LOOKS_VALID" ? "No visible problems found" : review.verdict === "UNREADABLE" ? "Document is hard to read" : "Some things need a look"}
+              >
+                The AI only flags visible problems. A person on the Support team makes the final decision.
+              </Alert>
+              {review.source === "gemini" && (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 rounded-2xl bg-canvas p-3.5 text-[13.5px]">
+                  <dt className="text-ink-muted">Document</dt>
+                  <dd className="font-semibold text-ink">{review.document_type || "—"}</dd>
+                  <dt className="text-ink-muted">Name on it</dt>
+                  <dd className="font-semibold text-ink">{review.extracted.name || "—"}</dd>
+                  <dt className="text-ink-muted">Reg. no.</dt>
+                  <dd className="font-semibold text-ink">{review.extracted.registration_number || "—"}</dd>
+                  <dt className="text-ink-muted">Issued by</dt>
+                  <dd className="font-semibold text-ink">{review.extracted.council_or_university || "—"}</dd>
+                </dl>
+              )}
+              {review.issues.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[14px] font-semibold text-ink">Flagged</p>
+                  <ul className="space-y-1.5">
+                    {review.issues.map((i) => (
+                      <li key={i} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[13.5px] text-amber-900">
+                        {i}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <Button full loading={busy} onClick={submitApplication}>
+                Send to Support for verification
+              </Button>
+              <Button full variant="secondary" onClick={() => setStep("professional")}>
+                Upload a different file
+              </Button>
+            </div>
+          )}
+
+          {step === "pending" && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 rounded-2xl bg-sage/50 p-4">
+                <BadgeCheck className="h-8 w-8 shrink-0 text-brand" />
+                <div>
+                  <p className="font-semibold text-ink">Application {appId} is with the Support team</p>
+                  <p className="text-[13.5px] text-ink-muted">Verification usually takes 1–3 working days. You can see patients once approved.</p>
+                </div>
+              </div>
+              <Button full onClick={() => router.replace("/doctor")}>
+                Open doctor console
+              </Button>
+              <Button full variant="tertiary" icon={<Sparkles className="h-4 w-4" />} onClick={useDemoDoctor}>
+                Use demo doctor account for now
+              </Button>
+            </div>
+          )}
+        </div>
+        <p className="mt-4 text-center text-[12.5px] text-ink-soft">For emergencies call 108.</p>
+      </div>
+    </div>
+  );
+}
