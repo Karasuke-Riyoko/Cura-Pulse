@@ -150,7 +150,7 @@ interface ToastItem {
 const DOCTOR = {
   name: "Dr. Sunita Sharma",
   title: "Cardiology & General Medicine",
-  hospital: "Max Super Speciality Hospital, Saket",
+  hospital: "Apollo Indraprastha, New Delhi",
   nmc: "#DL-2018-09412",
 };
 

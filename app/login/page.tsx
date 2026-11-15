@@ -396,18 +396,17 @@ export default function LoginPage() {
     if (r.error) setError(r.error);
   };
 
-  const fillDemo = () => {
-    setError(null);
-    if (step === "staffCreds") {
+  /** Fills every field of the current step with demo data. */
+  const fillStep = (st: Step) => {
+    if (st === "staffCreds") {
       setStaffId(staffRole === "admin" ? "admin01" : "support01");
       setStaffPass(staffRole === "admin" ? "CuraAdmin@2026" : "CuraSupport@2026");
-      return;
-    }
-    if (step === "details") {
+    } else if (st === "details") {
       if (tab === "doctor") {
-        setFirstName("Meera");
-        setSurname("Iyer");
-        setAge("34");
+        // Same doctor the patient app lists as d1, so names match on both sides.
+        setFirstName("Dr. Sunita");
+        setSurname("Sharma");
+        setAge("41");
         setSex("Female");
       } else {
         setFirstName("Aarohi");
@@ -415,25 +414,62 @@ export default function LoginPage() {
         setAge("24");
         setSex("Female");
       }
-      return;
-    }
-    if (step === "method") {
+    } else if (st === "method") {
       setMethod("phone");
       setContact(tab === "doctor" ? "+91 98111 12222" : tab === "staff" ? "+91 98000 00001" : "+91 98101 23456");
-      return;
-    }
-    if (step === "code" && codeIsDemo) {
+    } else if (st === "code") {
       setCode(DEMO_PHONE_OTP);
+    } else if (st === "professional") {
+      setQualification("MBBS, MD (General Medicine), DM (Cardiology)");
+      setSpecialty("Cardiology & General Medicine");
+      setRegNo("DL-2018-09412");
+      setCouncil("Delhi Medical Council");
+      setExperience("14");
+      setHospital("Apollo Indraprastha, New Delhi");
+      void fetch("/demo/demo-doctor-certificate.pdf")
+        .then((r) => r.blob())
+        .then((b) => setFile(new File([b], "demo-doctor-certificate.pdf", { type: "application/pdf" })))
+        .catch(() => undefined);
+    }
+  };
+
+  /** One click: fill and continue through every step until there is something to look at. */
+  const demoAuto = useRef(false);
+  const stepAction = useRef<() => void>(() => undefined);
+  stepAction.current = () => {
+    if (step === "details") submitDetails();
+    else if (step === "staffCreds") void staffContinue();
+    else if (step === "method") void requestCode();
+    else if (step === "code") void checkCode();
+    else if (step === "professional") {
+      if (file) void runAiCheck();
+      else window.setTimeout(() => stepAction.current(), 300); // certificate still loading
+    } else demoAuto.current = false;
+  };
+  useEffect(() => {
+    if (!demoAuto.current || busy) return;
+    if (step === "code" && !codeIsDemo) {
+      demoAuto.current = false; // real email code: the person types it
       return;
     }
-    if (step === "professional") {
-      setQualification("MBBS, MD (General Medicine)");
-      setSpecialty("General Medicine");
-      setRegNo("DMC/R/2019/11873");
-      setCouncil("Delhi Medical Council");
-      setExperience("8");
-      setHospital("Bhagwan Mahavir Hospital, Pitampura");
+    if (step === "review" || step === "pending") {
+      demoAuto.current = false; // stop so the AI review can be read before sending
+      return;
     }
+    fillStep(step);
+    const t = window.setTimeout(() => stepAction.current(), 450);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+  useEffect(() => {
+    if (error) demoAuto.current = false;
+  }, [error]);
+
+  const fillDemo = () => {
+    setError(null);
+    demoAuto.current = true;
+    fillStep(step);
+    window.setTimeout(() => stepAction.current(), 450);
   };
   const canFillDemo = step === "details" || step === "staffCreds" || step === "method" || step === "professional" || (step === "code" && codeIsDemo);
 
@@ -556,7 +592,7 @@ export default function LoginPage() {
 
           {canFillDemo && (
             <button type="button" onClick={fillDemo} className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-lav/60 px-3 py-1 text-[12.5px] font-semibold text-lav-ink hover:bg-lav">
-              <Sparkles className="h-3.5 w-3.5" /> Fill demo details
+              <Sparkles className="h-3.5 w-3.5" /> Fill demo details &amp; continue
             </button>
           )}
           {error && (

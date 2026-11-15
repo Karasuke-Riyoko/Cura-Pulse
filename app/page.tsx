@@ -112,7 +112,8 @@ type Screen =
   | "vitals"
   | "records"
   | "share"
-  | "snapshot";
+  | "snapshot"
+  | "assistant";
 type TabKey = "home" | "care" | "vitals" | "records" | "chats";
 
 interface EmergencyContact {
@@ -178,11 +179,15 @@ interface Booking {
 
 interface Vital {
   id: string;
+  /** Short test date shown on charts, e.g. "12 Nov". */
   label: string;
   sys: number;
   dia: number;
   pulse: number;
   glucose: number;
+  /** Where the test was taken. */
+  source?: "Home" | "Clinic" | "Lab";
+  sugarType?: "Fasting" | "After meal" | "Random";
 }
 
 interface AiResult {
@@ -299,13 +304,15 @@ const PHARMACIES = [
   { id: "p4", name: "Wellness Forever 24x7, Pitampura", km: 2.6, night: true, govtVerified: false, phone: "+911147012299", out: [] as string[] },
 ];
 
+/** Last few check-ups (not a live feed): each entry is one test with its date and where it was taken. */
 const SEED_VITALS: Vital[] = [
-  { id: "s1", label: "Mon", sys: 138, dia: 88, pulse: 84, glucose: 112 },
-  { id: "s2", label: "Tue", sys: 134, dia: 86, pulse: 80, glucose: 106 },
-  { id: "s3", label: "Wed", sys: 142, dia: 92, pulse: 88, glucose: 121 },
-  { id: "s4", label: "Thu", sys: 130, dia: 84, pulse: 78, glucose: 101 },
-  { id: "s5", label: "Fri", sys: 126, dia: 82, pulse: 76, glucose: 98 },
+  { id: "s1", label: "14 Sep", sys: 142, dia: 92, pulse: 86, glucose: 118, source: "Clinic", sugarType: "Fasting" },
+  { id: "s2", label: "03 Oct", sys: 138, dia: 88, pulse: 82, glucose: 112, source: "Home", sugarType: "Fasting" },
+  { id: "s3", label: "21 Oct", sys: 134, dia: 86, pulse: 80, glucose: 106, source: "Lab", sugarType: "Fasting" },
+  { id: "s4", label: "02 Nov", sys: 130, dia: 84, pulse: 78, glucose: 101, source: "Home", sugarType: "Fasting" },
+  { id: "s5", label: "12 Nov", sys: 126, dia: 82, pulse: 76, glucose: 98, source: "Clinic", sugarType: "Fasting" },
 ];
+const shortDate = (d: Date) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
 
 const PAST_VISITS = [
   { date: "02 Sep 2026", doctor: "Dr. Rohit Mathur", reason: "Seasonal fever follow-up", outcome: "Recovered" },
@@ -325,6 +332,7 @@ const TAB_OF: Record<Screen, TabKey> = {
   sosCountdown: "home",
   sosStatus: "home",
   snapshot: "records",
+  assistant: "chats",
   care: "care",
   book: "care",
   confirmed: "care",
@@ -550,6 +558,11 @@ export default function PatientPortal() {
   const [expanded, setExpanded] = useState<string[]>([]);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [typing, setTyping] = useState(false);
+  // ---- AI assistant (kept only in memory on this device) ----
+  const [aiMsgs, setAiMsgs] = useState<{ id: string; role: "user" | "assistant"; text: string; suggestions?: { label: string; action: string; specialty?: string }[]; emergency?: boolean }[]>([]);
+  const [aiInput, setAiInput] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const aiEndRef = useRef<HTMLDivElement | null>(null);
   const [patientId, setPatientId] = useState("");
   const [liveChat, setLiveChat] = useState<"connecting" | "live" | "offline">("connecting");
   const fallbackTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -577,6 +590,9 @@ export default function PatientPortal() {
   const [vDia, setVDia] = useState("80");
   const [vPulse, setVPulse] = useState("76");
   const [vGlu, setVGlu] = useState("96");
+  const [vDate, setVDate] = useState("");
+  const [vSource, setVSource] = useState<"Home" | "Clinic" | "Lab">("Home");
+  const [vSugarType, setVSugarType] = useState<"Fasting" | "After meal" | "Random">("Fasting");
   const [vitalsError, setVitalsError] = useState<string | null>(null);
 
   // ---- records ----
@@ -934,8 +950,12 @@ export default function PatientPortal() {
           "postgres_changes",
           { event: "UPDATE", schema: "public", table: "sos_incidents", filter: `id=eq.${insertedId}` },
           (payload) => {
-            const st = String((payload.new as Record<string, unknown>).status ?? "");
-            setDeskAck(st === "RESOLVED" ? "Support Desk marked your incident resolved." : `Support Desk update: ${st}`);
+            const row = payload.new as Record<string, unknown>;
+            const st = String(row.status ?? "");
+            if (st === "RESOLVED") setDeskAck("Support Desk marked your incident resolved.");
+            else if (row.ambulance_dispatched) setDeskAck(`Ambulance ${String(row.ambulance_unit ?? "")} is on the way. Stay where you are and keep your phone on.`);
+            else if (row.pre_intake_state === "CONFIRMED") setDeskAck("The hospital has received your health snapshot and is getting ready.");
+            else if (row.first_action_at) setDeskAck("A Support Desk agent has opened your alert.");
           }
         )
         .subscribe();
@@ -1353,6 +1373,46 @@ export default function PatientPortal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booking?.token]);
 
+  const askAssistant = async (e?: React.FormEvent, preset?: string) => {
+    e?.preventDefault();
+    const text = (preset ?? aiInput).trim();
+    if (!text || aiBusy) return;
+    const next = [...aiMsgs, { id: `u-${uid()}`, role: "user" as const, text }];
+    setAiMsgs(next);
+    setAiInput("");
+    setAiBusy(true);
+    later(() => aiEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }), 60);
+    try {
+      const res = await fetch("/api/assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Data minimisation: no name, phone or contact details leave the device.
+        body: JSON.stringify({
+          messages: next.map((m) => ({ role: m.role, text: m.text })),
+          profile: { age: profile.age, sex: profile.gender, allergies: profile.allergies, conditions: profile.conditions },
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Assistant unavailable");
+      setAiMsgs((m) => [...m, { id: `a-${uid()}`, role: "assistant", text: json.reply, suggestions: json.suggestions, emergency: json.emergency }]);
+    } catch (err) {
+      setAiMsgs((m) => [...m, { id: `a-${uid()}`, role: "assistant", text: err instanceof Error && /too many/i.test(err.message) ? err.message : "I can't connect right now. Check your internet and try again.", suggestions: [] }]);
+    }
+    setAiBusy(false);
+    later(() => aiEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }), 60);
+  };
+
+  const runAiAction = (a: { action: string; specialty?: string }) => {
+    if (a.action === "sos") go("sos");
+    else if (a.action === "book") {
+      setQuery(a.specialty ?? "");
+      goTab("care");
+    } else if (a.action === "pharmacies") go("rx");
+    else if (a.action === "vitals") goTab("vitals");
+    else if (a.action === "records") goTab("records");
+    else if (a.action === "symptom") go("symptom");
+  };
+
   const scriptedReply = (text: string, doc: Doctor) => {
     setTyping(false);
     const reply = craftReply(text, doc);
@@ -1556,11 +1616,12 @@ export default function PatientPortal() {
       return;
     }
     setVitalsError(null);
-    const entry: Vital = { id: uid(), label: clock(), sys, dia, pulse, glucose: glu };
+    const when = vDate ? new Date(`${vDate}T12:00:00`) : new Date();
+    const entry: Vital = { id: uid(), label: shortDate(when), sys, dia, pulse, glucose: glu, source: vSource, sugarType: vSugarType };
     setVitals((prev) => [...prev, entry].slice(-8));
     setLogOpen(false);
     const docId = chatIdRef.current && chatIdRef.current !== "support" ? chatIdRef.current : "d1";
-    setMessages((prev) => [...prev, { id: `pv-${entry.id}`, sender: "patient", time: entry.label, text: `BP ${sys}/${dia} mmHg · Pulse ${pulse} bpm · Glucose ${glu} mg/dL` }], docId);
+    setMessages((prev) => [...prev, { id: `pv-${entry.id}`, sender: "patient", time: entry.label, text: `Test on ${entry.label} (${vSource}): BP ${sys}/${dia} mmHg · Pulse ${pulse} bpm · ${vSugarType} sugar ${glu} mg/dL` }], docId);
     const high = sys >= 160 || dia >= 100 || glu >= 250;
     later(() => {
       setMessages(
@@ -1732,7 +1793,7 @@ export default function PatientPortal() {
       case "vitals":
         return (
           <Card id={id} className={cx("p-4", wrap(card))}>
-            <CardHeader title="Share today's readings" sub={`Last: BP ${latest.sys}/${latest.dia} · Pulse ${latest.pulse} · Sugar ${latest.glucose}`} right={<Activity className="h-5 w-5 text-brand" />} />
+            <CardHeader title="Share your last test" sub={`${latest.label}: BP ${latest.sys}/${latest.dia} · Pulse ${latest.pulse} · Sugar ${latest.glucose}`} right={<Activity className="h-5 w-5 text-brand" />} />
             <Button full size="md" variant="secondary" icon={<Plus className="h-4 w-4" />} onClick={() => setLogOpen(true)}>
               Log a reading
             </Button>
@@ -2216,9 +2277,10 @@ export default function PatientPortal() {
       <div>
         <Eyebrow className="mb-2">Quick access</Eyebrow>
         <div className={cx("grid gap-2.5", P ? "grid-cols-1" : "grid-cols-2")}>
+          <RowButton icon={<Sparkles className="h-5 w-5" />} title="Ask CuraPulse Assistant" sub="AI health tips and next steps" onClick={() => go("assistant")} />
           <RowButton icon={<Search className="h-5 w-5" />} title="Find care" sub={isWoman ? "Verified doctors, women-rated" : "Verified doctors near you"} onClick={() => goTab("care")} />
           <RowButton icon={<Pill className="h-5 w-5" />} title="Pharmacies" sub="Govt-verified stock near you" onClick={() => go("rx")} />
-          <RowButton icon={<HeartPulse className="h-5 w-5" />} title="Vitals" sub={`Last BP ${latest.sys}/${latest.dia}`} onClick={() => goTab("vitals")} />
+          <RowButton icon={<HeartPulse className="h-5 w-5" />} title="Last test results" sub={`${latest.label}: BP ${latest.sys}/${latest.dia}`} onClick={() => goTab("vitals")} />
           <RowButton icon={<ClipboardList className="h-5 w-5" />} title="Emergency Health Snapshot" sub={savedAt ? `Saved on this device · ${savedAt}` : "Saved on this device"} onClick={() => go("snapshot")} />
         </div>
       </div>
@@ -2756,6 +2818,18 @@ export default function PatientPortal() {
             </button>
           ))}
         </div>
+        <button type="button" onClick={() => go("assistant")} className="mb-2 flex w-full items-center gap-3 rounded-2xl border border-lav-line bg-lav/40 px-3.5 py-3 text-left hover:bg-lav/60">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#6B5BA8] to-brand text-white">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 text-[15.5px] font-bold text-ink">
+              CuraPulse Assistant <Badge tone="lav">AI</Badge>
+            </span>
+            <span className="block truncate text-[13.5px] text-ink-muted">{aiMsgs.length ? aiMsgs[aiMsgs.length - 1].text : "Health tips, which doctor to see, what to ask"}</span>
+          </span>
+          <Pin className="h-3.5 w-3.5 shrink-0 text-ink-soft" aria-label="Pinned" />
+        </button>
         <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-card">
           {rows.length === 0 && <p className="p-6 text-center text-[14px] text-ink-muted">No chats match.</p>}
           {rows.map((d) => {
@@ -2953,6 +3027,88 @@ export default function PatientPortal() {
     );
   };
 
+  const renderAssistant = () => {
+    const starters = ["I've had a headache for 3 days", "Diet tips for high BP", "Which doctor for knee pain?", "Mujhe neend nahi aati"];
+    return (
+      <div className={cx("flex flex-col", P ? "-mx-4 -my-4 flex-1" : "mx-auto min-h-[calc(100vh-110px)] max-w-3xl overflow-hidden rounded-2xl border border-line")}>
+        <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-line bg-white px-2 py-2">
+          <button type="button" onClick={back} aria-label="Back" className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-canvas">
+            <ArrowLeft className="h-5 w-5" />
+          </button>
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#6B5BA8] to-brand text-white">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[16px] font-bold text-ink">CuraPulse Assistant</p>
+            <p className="truncate text-[12.5px] text-ink-muted">{aiBusy ? "thinking…" : "AI guidance · not a doctor"}</p>
+          </div>
+        </div>
+        <div className="flex-1 space-y-2 bg-[#EEEBF6] px-3 py-3" aria-live="polite">
+          <div className="mx-auto max-w-[92%] rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] leading-snug text-amber-900">
+            AI suggestions only. It can't diagnose or prescribe (Telemedicine Practice Guidelines 2020). Don't share Aadhaar, phone or address. Chats stay on this device and aren't saved. Emergency? Press SOS or call 108.
+          </div>
+          {aiMsgs.length === 0 && (
+            <div className="space-y-2 pt-2">
+              <p className="text-center text-[13.5px] text-ink-muted">Try asking</p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {starters.map((q) => (
+                  <button key={q} type="button" onClick={() => void askAssistant(undefined, q)} className="rounded-full border border-lav-line bg-white px-3 py-1.5 text-[13.5px] font-semibold text-lav-ink hover:bg-lav/40">
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {aiMsgs.map((m) => (
+            <div key={m.id} className={cx("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+              <div className={cx("max-w-[85%] rounded-xl px-3 py-2 text-[14.5px] leading-snug text-ink shadow-[0_1px_1px_rgba(0,0,0,0.06)]", m.role === "user" ? "rounded-tr-sm bg-[#CDEBE1]" : m.emergency ? "rounded-tl-sm border border-coral/40 bg-[#FDECEA]" : "rounded-tl-sm bg-white")}>
+                <p className="whitespace-pre-wrap">{m.text}</p>
+                {m.emergency && (
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="emergency" icon={<Siren className="h-4 w-4" />} onClick={() => go("sos")}>
+                      SOS
+                    </Button>
+                    <a href="tel:108" className="inline-flex h-9 items-center rounded-xl border border-coral px-3 text-[13.5px] font-semibold text-coral">
+                      Call 108
+                    </a>
+                  </div>
+                )}
+                {!!m.suggestions?.length && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {m.suggestions.map((sg) => (
+                      <button key={sg.label} type="button" onClick={() => runAiAction(sg)} className="rounded-full bg-sage px-2.5 py-1 text-[12.5px] font-semibold text-sage-ink hover:bg-sage/70">
+                        {sg.label} →
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          {aiBusy && (
+            <div className="flex justify-start">
+              <div className="rounded-xl rounded-tl-sm bg-white px-3 py-2 text-[14px] text-ink-muted">Thinking…</div>
+            </div>
+          )}
+          <div ref={aiEndRef} />
+        </div>
+        <form onSubmit={(e) => void askAssistant(e)} className={cx("flex items-center gap-2 bg-canvas px-2.5 py-2.5", P && "sticky bottom-0")}>
+          <input
+            aria-label="Ask the assistant"
+            placeholder="Ask about symptoms, diet, which doctor…"
+            value={aiInput}
+            maxLength={1000}
+            onChange={(e) => setAiInput(e.target.value)}
+            className="h-12 min-w-0 flex-1 rounded-full border border-line bg-white px-4 text-[15px] text-ink placeholder:text-ink-soft focus:border-brand focus:outline-none"
+          />
+          <button type="submit" aria-label="Ask" disabled={!aiInput.trim() || aiBusy} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-brand text-white disabled:bg-ink-soft/40">
+            <Send className="h-5 w-5" />
+          </button>
+        </form>
+      </div>
+    );
+  };
+
   const renderRx = () => (
     <div className="space-y-4">
       <ScreenHeader title="Pharmacies near you" sub="Stock reported by govt-verified stores." onBack={back} />
@@ -3032,26 +3188,54 @@ export default function PatientPortal() {
       sugar: { series: [{ name: "Glucose", values: vitals.map((v) => v.glucose) }], min: 60, max: 200, target: { from: 70, to: 140, label: "Target" }, unit: "mg/dL" },
     }[vMetric];
     const highBp = latest.sys >= 140 || latest.dia >= 90;
+    const prev = vitals.length > 1 ? vitals[vitals.length - 2] : null;
+    const delta = (now: number, before: number | undefined, unit: string) => {
+      if (before == null) return "First test on record";
+      const d = now - before;
+      if (d === 0) return `No change since ${prev?.label}`;
+      return `${d > 0 ? "▲" : "▼"} ${Math.abs(d)} ${unit} since ${prev?.label}`;
+    };
+    const sugarHigh = latest.sugarType === "Fasting" || !latest.sugarType ? latest.glucose >= 100 : latest.glucose >= 140;
     return (
       <div className="space-y-4">
-        <ScreenHeader title="Vitals" sub="Shared with your doctor automatically." right={<Button size="sm" icon={<Plus className="h-4 w-4" />} onClick={() => setLogOpen(true)}>Log</Button>} />
-        <div className={cx("grid gap-2.5", P ? "grid-cols-3" : "grid-cols-3")}>
-          {[
-            ["Blood pressure", `${latest.sys}/${latest.dia}`, "mmHg", highBp],
-            ["Pulse", `${latest.pulse}`, "bpm", latest.pulse > 100 || latest.pulse < 50],
-            ["Sugar", `${latest.glucose}`, "mg/dL", latest.glucose >= 180],
-          ].map(([l, v, u, warn]) => (
-            <Card key={l as string} className="p-3">
-              <p className="text-[12px] font-semibold text-ink-muted">{l}</p>
-              <p className="tabular text-[20px] font-bold text-ink">{v}</p>
-              <p className="text-[11.5px] text-ink-soft">{u}</p>
-              <Badge tone={warn ? "warn" : "ok"} className="mt-1">
-                {warn ? "Above target" : "In range"}
-              </Badge>
+        <ScreenHeader
+          title="Last test results"
+          sub={`Most recent check: ${latest.label}${latest.source ? ` · ${latest.source}` : ""}. Your doctor sees these when you share records.`}
+          right={
+            <Button size="sm" icon={<Plus className="h-4 w-4" />} onClick={() => setLogOpen(true)}>
+              Add test
+            </Button>
+          }
+        />
+        <div className="grid grid-cols-1 gap-2.5">
+          {(
+            [
+              ["Blood pressure", `${latest.sys}/${latest.dia}`, "mmHg", highBp, highBp ? "Above the 130/80 target" : "Within target", delta(latest.sys, prev?.sys, "systolic")],
+              ["Pulse", `${latest.pulse}`, "bpm", latest.pulse > 100 || latest.pulse < 50, latest.pulse > 100 ? "Faster than usual" : latest.pulse < 50 ? "Slower than usual" : "Normal resting range", delta(latest.pulse, prev?.pulse, "bpm")],
+              [
+                `${latest.sugarType ?? "Fasting"} sugar`,
+                `${latest.glucose}`,
+                "mg/dL",
+                sugarHigh,
+                sugarHigh ? (latest.glucose >= 126 && (latest.sugarType ?? "Fasting") === "Fasting" ? "High: discuss with your doctor" : "A little above normal") : "Normal",
+                delta(latest.glucose, prev?.glucose, "mg/dL"),
+              ],
+            ] as [string, string, string, boolean, string, string][]
+          ).map(([l, v, u, warn, note, change]) => (
+            <Card key={l} className="flex items-center gap-3 p-3.5">
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] font-semibold text-ink-muted">{l}</p>
+                <p className="tabular text-[22px] font-bold leading-tight text-ink">
+                  {v} <span className="text-[13px] font-semibold text-ink-soft">{u}</span>
+                </p>
+                <p className="text-[12.5px] text-ink-muted">{change}</p>
+              </div>
+              <Badge tone={warn ? "warn" : "ok"}>{note}</Badge>
             </Card>
           ))}
         </div>
         <Card className="p-4">
+          <CardHeader title="Trend across your tests" sub={`${vitals.length} tests from ${vitals[0].label} to ${latest.label}`} />
           <Segmented
             value={vMetric}
             onChange={(v) => setVMetric(v as "bp" | "pulse" | "sugar")}
@@ -3064,16 +3248,23 @@ export default function PatientPortal() {
           <div className="mt-4">
             <LineChart labels={labels} series={conf.series} min={conf.min} max={conf.max} target={conf.target} unit={conf.unit} height={P ? 170 : 220} showValues />
           </div>
-          <p className="mt-2 text-[12.5px] text-ink-muted">Shaded band shows your target range. Last {vitals.length} readings.</p>
+          <p className="mt-2 text-[12.5px] text-ink-muted">Each point is one test. The shaded band is the healthy range.</p>
         </Card>
         <Card className="p-4">
-          <CardHeader title="Recent readings" />
+          <CardHeader title="Test history" />
           <ul className="divide-y divide-line text-[14px]">
             {[...vitals].reverse().map((v) => (
-              <li key={v.id} className="flex items-center justify-between py-2">
-                <span className="text-ink-muted">{v.label}</span>
-                <span className="tabular text-ink">
-                  {v.sys}/{v.dia} · {v.pulse} bpm · {v.glucose} mg/dL
+              <li key={v.id} className="flex items-center justify-between gap-3 py-2.5">
+                <span className="min-w-0">
+                  <span className="block font-semibold text-ink">{v.label}</span>
+                  <span className="text-[12.5px] text-ink-muted">{v.source ?? "Home"} test</span>
+                </span>
+                <span className="tabular text-right text-[13.5px] text-ink">
+                  BP {v.sys}/{v.dia} · {v.pulse} bpm
+                  <br />
+                  <span className="text-ink-muted">
+                    {v.sugarType ?? "Fasting"} sugar {v.glucose}
+                  </span>
                 </span>
               </li>
             ))}
@@ -3231,6 +3422,8 @@ export default function PatientPortal() {
         return renderChats();
       case "chat":
         return renderChat();
+      case "assistant":
+        return renderAssistant();
       case "rx":
         return renderRx();
       case "vitals":
@@ -3251,6 +3444,21 @@ export default function PatientPortal() {
   // ==========================================================================
   const overlay = (
     <>
+      {mounted && onboarded && !["assistant", "chat", "sos", "sosCountdown", "sosStatus"].includes(screen) && (
+        <button
+          type="button"
+          aria-label="Ask CuraPulse Assistant"
+          title="Ask CuraPulse Assistant"
+          onClick={() => go("assistant")}
+          className={cx("cp-ai-fab group z-40 flex h-14 w-14 items-center justify-center", P ? "absolute bottom-[84px] right-4" : "fixed bottom-6 right-6")}
+        >
+          <span aria-hidden className="cp-ai-ring absolute inset-0 rounded-full bg-brand/40" />
+          <span aria-hidden className="cp-ai-ring r2 absolute inset-0 rounded-full bg-brand/30" />
+          <span className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-brand to-[#4B4E9E] text-white shadow-lg ring-2 ring-white transition-transform group-hover:scale-105">
+            <Sparkles className="cp-ai-star h-6 w-6" />
+          </span>
+        </button>
+      )}
       {logOpen && (
         <div className={cx("flex bg-ink/40", P ? "absolute inset-0 items-end" : "fixed inset-0 items-center justify-center")} onClick={() => setLogOpen(false)}>
           <div
@@ -3261,7 +3469,7 @@ export default function PatientPortal() {
             className={cx("w-full bg-white p-5 shadow-frame", P ? "rounded-t-3xl" : "max-w-md rounded-2xl")}
           >
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-[19px] font-bold text-ink">Log a reading</h2>
+              <h2 className="text-[19px] font-bold text-ink">Add a test result</h2>
               <button type="button" aria-label="Close" onClick={() => setLogOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas">
                 <X className="h-5 w-5" />
               </button>
@@ -3285,8 +3493,28 @@ export default function PatientPortal() {
                 </Field>
               ))}
             </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Field label="Test date" htmlFor="v-date">
+                <input id="v-date" type="date" value={vDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setVDate(e.target.value)} className={inputCls} />
+              </Field>
+              <Field label="Sugar test" htmlFor="v-sugar-type">
+                <select id="v-sugar-type" value={vSugarType} onChange={(e) => setVSugarType(e.target.value as typeof vSugarType)} className={inputCls}>
+                  <option>Fasting</option>
+                  <option>After meal</option>
+                  <option>Random</option>
+                </select>
+              </Field>
+            </div>
+            <p className="mb-1.5 mt-3 text-[14px] font-semibold text-ink">Measured at</p>
+            <div className="flex gap-2">
+              {(["Home", "Clinic", "Lab"] as const).map((src) => (
+                <ChoiceChip key={src} on={vSource === src} onClick={() => setVSource(src)}>
+                  {src}
+                </ChoiceChip>
+              ))}
+            </div>
             <Button className="mt-4" full onClick={logVitals}>
-              Save reading
+              Save test result
             </Button>
           </div>
         </div>
@@ -3536,7 +3764,7 @@ export default function PatientPortal() {
       ) : !onboarded ? (
         renderOnboarding()
       ) : (
-        <div className={cx(P ? "min-h-full px-4 py-4" : "mx-auto max-w-5xl", P && screen === "chat" && "flex flex-col")}>{renderScreen()}</div>
+        <div className={cx(P ? "min-h-full px-4 py-4" : "mx-auto max-w-5xl", P && (screen === "chat" || screen === "assistant") && "flex flex-col")}>{renderScreen()}</div>
       )}
     </Shell>
   );

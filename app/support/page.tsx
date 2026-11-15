@@ -775,6 +775,19 @@ export default function SupportCommandCenterPage() {
             : item
         )
       );
+      // Share dispatch / pre-intake progress with the patient's phone and the admin console.
+      const cloudPatch: Record<string, unknown> = { ...extra };
+      if (firstActionAt) cloudPatch.first_action_at = firstActionAt;
+      delete (cloudPatch as { notes?: unknown }).notes;
+      if (Object.keys(cloudPatch).length && /^[0-9a-f-]{36}$/i.test(id)) {
+        void (async () => {
+          try {
+            await supabase.from("sos_incidents").update(cloudPatch).eq("id", id);
+          } catch {
+            /* offline: local state only */
+          }
+        })();
+      }
     },
     []
   );

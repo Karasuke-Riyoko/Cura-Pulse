@@ -41,3 +41,13 @@ body {
     display: none !important;
   }
 }
+
+/* Floating AI assistant button: transform/opacity only, so the loop is cheap. */
+@keyframes cp-ai-ring { 0% { transform: scale(1); opacity: .55; } 70%, 100% { transform: scale(1.75); opacity: 0; } }
+@keyframes cp-ai-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes cp-ai-twinkle { 0%, 100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(18deg) scale(1.12); } }
+.cp-ai-fab { animation: cp-ai-float 3.2s ease-in-out infinite; }
+.cp-ai-fab .cp-ai-ring { animation: cp-ai-ring 2.4s ease-out infinite; }
+.cp-ai-fab .cp-ai-ring.r2 { animation-delay: 1.2s; }
+.cp-ai-fab .cp-ai-star { animation: cp-ai-twinkle 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .cp-ai-fab, .cp-ai-fab .cp-ai-ring, .cp-ai-fab .cp-ai-star { animation: none; } }
