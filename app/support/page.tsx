@@ -7,6 +7,7 @@ import {
   BadgeCheck,
   ClipboardList,
   MessageCircle,
+  MessageSquare,
   Hospital,
   MapPin,
   PhoneCall,
@@ -19,6 +20,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import { supabase as sharedSupabase } from "@/lib/supabase";
+import { smsHref, telHref, validPhone, waHref } from "@/lib/contact";
 import { Shell, useViewState } from "@/components/Shell";
 import { LiveChatInbox } from "@/components/LiveChatInbox";
 import { Alert, Avatar, Badge, Button, Card, CardHeader, ChoiceChip, Eyebrow, LinkButton, PageTitle, Timeline, cx } from "@/components/ui";
@@ -797,7 +799,7 @@ export default function SupportCommandCenterPage() {
       incident.id,
       `Outbound voice call started to ${incident.patient_phone} by Agent ${AGENT_ID}.`
     );
-    window.location.href = `tel:${incident.patient_phone}`;
+    window.location.href = telHref(incident.patient_phone);
   };
 
   const handleDispatchAmbulance = (incident: SosIncident) => {
@@ -1148,6 +1150,26 @@ export default function SupportCommandCenterPage() {
               Mark resolved
             </Button>
           </div>
+          {validPhone(i.patient_phone) && (
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <a
+                href={smsHref([i.patient_phone], `CuraPulse Support: we got your SOS (${i.id}). ${i.ambulance_dispatched ? `Ambulance ${i.ambulance_unit} is on the way.` : "An agent is on it."} Stay where you are and keep your phone on. Emergency: 108.`)}
+                onClick={() => logAction(i.id, `SMS opened to ${i.patient_phone} by Agent ${AGENT_ID}.`)}
+                className="flex items-center justify-center gap-2 rounded-xl border border-line bg-white px-3 py-2.5 text-[14px] font-semibold text-brand"
+              >
+                <MessageSquare className="h-4 w-4" /> SMS patient
+              </a>
+              <a
+                href={waHref(i.patient_phone, `CuraPulse Support: we got your SOS (${i.id}). ${i.ambulance_dispatched ? `Ambulance ${i.ambulance_unit} is on the way.` : "An agent is on it."} Please share your live location here. Emergency: 108.`)}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => logAction(i.id, `WhatsApp opened to ${i.patient_phone} by Agent ${AGENT_ID}.`)}
+                className="flex items-center justify-center gap-2 rounded-xl border border-line bg-white px-3 py-2.5 text-[14px] font-semibold text-[#128C4B]"
+              >
+                <MessageCircle className="h-4 w-4" /> WhatsApp patient
+              </a>
+            </div>
+          )}
         </Card>
 
         {realAllergies.length > 0 ? (

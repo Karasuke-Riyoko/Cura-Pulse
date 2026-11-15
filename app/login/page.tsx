@@ -416,7 +416,7 @@ export default function LoginPage() {
       }
     } else if (st === "method") {
       setMethod("phone");
-      setContact(tab === "doctor" ? "+91 98111 12222" : tab === "staff" ? "+91 98000 00001" : "+91 98101 23456");
+      setContact(tab === "doctor" ? "+91 95217 81502" : tab === "staff" ? (staffRole === "admin" ? "+91 93540 82092" : "+91 97736 33163") : "+91 88009 48077");
     } else if (st === "code") {
       setCode(DEMO_PHONE_OTP);
     } else if (st === "professional") {

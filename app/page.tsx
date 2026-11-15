@@ -42,6 +42,7 @@ import {
   X,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { smsHref, telHref, validPhone, waHref } from "@/lib/contact";
 import { readSession, signOut, fullName as sessionName } from "@/lib/auth";
 import { Shell, useViewState } from "@/components/Shell";
 import {
@@ -2515,22 +2516,41 @@ export default function PatientPortal() {
             ]}
           />
         </Card>
-        <Card className="p-4">
-          <CardHeader title="Family SMS" right={<Badge tone="lav">Simulated</Badge>} sub="Demo gateway. No real SMS is sent." />
-          <ul className="space-y-2">
-            {smsLog.map((s, i) => (
-              <li key={i} className="flex items-center justify-between gap-2 text-[14px]">
-                <span className="min-w-0">
-                  <span className="block truncate font-semibold text-ink">{s.name}</span>
-                  <span className="tabular text-[13px] text-ink-muted">{s.phone}</span>
-                </span>
-                <Badge tone={s.status === "delivered" ? "ok" : s.status === "sent" ? "info" : "neutral"}>
-                  {s.status === "delivered" ? "Delivered" : s.status === "sent" ? "Sent" : "Pending"}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        </Card>
+        {(() => {
+          const contacts = profile.emergencyContacts.filter((c) => c.name.trim() && validPhone(c.phone));
+          const msg = `SOS from ${profile.name || "a CuraPulse user"} (blood ${profile.bloodGroup || "unknown"}). I need help. My location: https://maps.google.com/?q=${r.lat},${r.lng} · CuraPulse ref ${r.ref}`;
+          return (
+            <Card className="p-4">
+              <CardHeader title="Tell your family" sub="Opens your phone's SMS or WhatsApp with your location ready. Tap Send there." />
+              {contacts.length === 0 ? (
+                <p className="text-[14px] text-ink-muted">No emergency contact saved. Add one in your Emergency Health Snapshot.</p>
+              ) : (
+                <>
+                  {contacts.length > 1 && (
+                    <a href={smsHref(contacts.map((c) => c.phone), msg)} className="mb-3 flex w-full items-center justify-center gap-2 rounded-xl bg-coral px-4 py-3 text-[15px] font-semibold text-white">
+                      <MessageCircle className="h-4 w-4" /> SMS all {contacts.length} contacts
+                    </a>
+                  )}
+                  <ul className="space-y-2">
+                    {contacts.map((c, i) => (
+                      <li key={i} className="flex items-center justify-between gap-2 text-[14px]">
+                        <span className="min-w-0">
+                          <span className="block truncate font-semibold text-ink">{c.name}{c.relation ? ` (${c.relation})` : ""}</span>
+                          <span className="tabular text-[13px] text-ink-muted">{c.phone}</span>
+                        </span>
+                        <span className="flex shrink-0 gap-1.5">
+                          <a href={smsHref([c.phone], msg)} className="rounded-full border border-line bg-white px-3 py-1.5 text-[13px] font-semibold text-brand">SMS</a>
+                          <a href={waHref(c.phone, msg)} target="_blank" rel="noreferrer" className="rounded-full border border-line bg-white px-3 py-1.5 text-[13px] font-semibold text-[#128C4B]">WhatsApp</a>
+                          <a href={telHref(c.phone)} className="rounded-full border border-line bg-white px-3 py-1.5 text-[13px] font-semibold text-ink">Call</a>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </Card>
+          );
+        })()}
         <Card className="p-4">
           <CardHeader title="Nearest emergency rooms" />
           <ul className="space-y-2 text-[14px]">
