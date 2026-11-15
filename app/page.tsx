@@ -19,6 +19,7 @@ import {
   MapPin,
   Menu,
   MessageCircle,
+  PhoneCall,
   MoreHorizontal,
   Navigation,
   Phone,
@@ -540,6 +541,8 @@ export default function PatientPortal() {
   const [sosReceipt, setSosReceipt] = useState<SosReceipt | null>(null);
   const [smsLog, setSmsLog] = useState<SmsState[]>([]);
   const [deskAck, setDeskAck] = useState<string | null>(null);
+  const [ringing, setRinging] = useState<string | null>(null);
+  const ringStop = useRef<(() => void) | null>(null);
   const [alarmOn, setAlarmOn] = useState(false);
   const [holdPct, setHoldPct] = useState(0);
   const holdTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -736,6 +739,57 @@ export default function PatientPortal() {
   // ==========================================================================
   // AUDIO
   // ==========================================================================
+  /** Phone-style ring + vibration when the Support Desk acts on this SOS. Stops on tap or after 15 s. */
+  const stopRing = () => {
+    ringStop.current?.();
+    ringStop.current = null;
+    setRinging(null);
+  };
+  const ringPhone = (text: string) => {
+    setRinging(text);
+    if (ringStop.current) return;
+    const ctx = getAudio();
+    let alive = true;
+    const burst = () => {
+      if (!alive || !ctx) return;
+      [0, 0.45].forEach((offset) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = "sine";
+        o.frequency.value = 880;
+        g.gain.setValueAtTime(0.0001, ctx.currentTime + offset);
+        g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + offset + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + offset + 0.4);
+        o.connect(g).connect(ctx.destination);
+        o.start(ctx.currentTime + offset);
+        o.stop(ctx.currentTime + offset + 0.42);
+      });
+      try {
+        navigator.vibrate?.([400, 200, 400]);
+      } catch {
+        /* no vibration */
+      }
+    };
+    burst();
+    const iv = window.setInterval(burst, 2000);
+    const to = window.setTimeout(() => stopRing(), 15000);
+    try {
+      if ("Notification" in window && Notification.permission === "granted") new Notification("CuraPulse Support Desk", { body: text });
+    } catch {
+      /* ignore */
+    }
+    ringStop.current = () => {
+      alive = false;
+      window.clearInterval(iv);
+      window.clearTimeout(to);
+      try {
+        navigator.vibrate?.(0);
+      } catch {
+        /* ignore */
+      }
+    };
+  };
+
   const getAudio = (): AudioContext | null => {
     if (typeof window === "undefined") return null;
     try {
@@ -794,6 +848,11 @@ export default function PatientPortal() {
   const startSOS = () => {
     if (sosCounting || sosSending) return;
     getAudio(); // unlock audio inside the user gesture
+    try {
+      if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission();
+    } catch {
+      /* ignore */
+    }
     dispatchLock.current = false;
     setSosSeconds(5);
     setSosCounting(true);
@@ -953,10 +1012,16 @@ export default function PatientPortal() {
           (payload) => {
             const row = payload.new as Record<string, unknown>;
             const st = String(row.status ?? "");
-            if (st === "RESOLVED") setDeskAck("Support Desk marked your incident resolved.");
-            else if (row.ambulance_dispatched) setDeskAck(`Ambulance ${String(row.ambulance_unit ?? "")} is on the way. Stay where you are and keep your phone on.`);
-            else if (row.pre_intake_state === "CONFIRMED") setDeskAck("The hospital has received your health snapshot and is getting ready.");
-            else if (row.first_action_at) setDeskAck("A Support Desk agent has opened your alert.");
+            let msg: string | null = null;
+            if (st === "RESOLVED") msg = "Support Desk marked your incident resolved.";
+            else if (row.ambulance_dispatched) msg = `Ambulance ${String(row.ambulance_unit ?? "")} is on the way. Stay where you are and keep your phone on.`;
+            else if (row.pre_intake_state === "CONFIRMED") msg = "The hospital has received your health snapshot and is getting ready.";
+            else if (row.support_ring_at) msg = "The Support Desk is calling you now. Keep your phone close.";
+            else if (row.first_action_at) msg = "A Support Desk agent has opened your alert.";
+            if (msg) {
+              setDeskAck(msg);
+              if (st !== "RESOLVED") ringPhone(msg);
+            }
           }
         )
         .subscribe();
@@ -3464,6 +3529,19 @@ export default function PatientPortal() {
   // ==========================================================================
   const overlay = (
     <>
+      {ringing && (
+        <div role="alertdialog" aria-label="Support Desk alert" className={cx("z-[60] flex items-start gap-3 rounded-2xl bg-coral p-4 text-white shadow-lg", P ? "absolute left-3 right-3 top-3" : "fixed right-6 top-20 w-[380px]")}>
+          <span className="relative mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/20">
+            <span className="absolute inset-0 animate-ping rounded-full bg-white/40" />
+            <PhoneCall className="relative h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[15px] font-bold">Support Desk</p>
+            <p className="text-[14px] leading-snug">{ringing}</p>
+          </div>
+          <button type="button" onClick={stopRing} className="rounded-full bg-white px-3 py-1.5 text-[13px] font-bold text-coral">OK</button>
+        </div>
+      )}
       {mounted && onboarded && !["assistant", "chat", "sos", "sosCountdown", "sosStatus"].includes(screen) && (
         <button
           type="button"

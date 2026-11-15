@@ -43,7 +43,28 @@ const APPS_KEY = "curapulse_doctor_applications";
 const COUNCILS = ["National Medical Commission (NMC)", "Delhi Medical Council", "Maharashtra Medical Council", "Karnataka Medical Council", "Tamil Nadu Medical Council", "West Bengal Medical Council", "Other State Medical Council"];
 
 /** Local copy of who signed up with which email/phone, so "Log in" can find the name again on this device. */
+/** Lists every sign-in in public.app_users so the Admin directory shows real people. */
+function registerUser(s: Session) {
+  void (async () => {
+    try {
+      await supabase.from("app_users").upsert({
+        id: `${s.role}:${s.contact.trim().toLowerCase()}`,
+        role: s.role,
+        full_name: fullName(s),
+        contact: s.contact.trim(),
+        method: s.method,
+        age: Number(s.age) || null,
+        sex: s.sex || null,
+        doctor_status: s.doctorStatus ?? null,
+        last_seen_at: new Date().toISOString(),
+      });
+    } catch {
+      /* directory listing is best-effort */
+    }
+  })();
+}
 function rememberAccount(s: Session) {
+  registerUser(s);
   try {
     const all = JSON.parse(window.localStorage.getItem(ACCOUNTS_KEY) || "{}");
     all[`${s.role}:${s.contact.toLowerCase()}`] = { firstName: s.firstName, surname: s.surname, age: s.age, sex: s.sex, doctorAppId: s.doctorAppId, doctorStatus: s.doctorStatus };

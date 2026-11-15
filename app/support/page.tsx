@@ -84,6 +84,7 @@ interface SosIncident {
   id: string;
   patient_name: string;
   patient_phone: string;
+  support_ring_at?: string;
   created_at: string;
   status: "ACTIVE" | "RESOLVED";
   blood_group: string;
@@ -797,7 +798,8 @@ export default function SupportCommandCenterPage() {
   const handleCallPatient = (incident: SosIncident) => {
     logAction(
       incident.id,
-      `Outbound voice call started to ${incident.patient_phone} by Agent ${AGENT_ID}.`
+      `Outbound voice call started to ${incident.patient_phone} by Agent ${AGENT_ID}. Patient's app is ringing.`,
+      { support_ring_at: new Date().toISOString() }
     );
     window.location.href = telHref(incident.patient_phone);
   };

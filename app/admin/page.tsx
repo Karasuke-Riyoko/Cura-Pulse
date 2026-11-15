@@ -597,6 +597,57 @@ export default function AdminGovernanceConsole() {
     return () => window.clearInterval(t);
   }, []);
 
+  /* ------------- real sign-ups (table public.app_users) ------------- */
+  useEffect(() => {
+    const toUser = (r: Record<string, unknown>): DirectoryUser => {
+      const role = String(r.role ?? "patient");
+      const contact = String(r.contact ?? "");
+      return {
+        id: String(r.id),
+        name: String(r.full_name ?? "Unnamed"),
+        email: contact,
+        passportId: `CP-${String(r.id).replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase()}`,
+        role: role === "doctor" ? "Doctor" : role === "patient" ? "Patient" : "Support Desk",
+        status: role === "doctor" && r.doctor_status !== "VERIFIED_ACTIVE" ? "Pending Review" : "Active",
+        licenseState: role === "doctor" ? (r.doctor_status === "VERIFIED_ACTIVE" ? "Verified" : "Pending") : "Not Applicable",
+        joined: String(r.created_at ?? new Date().toISOString()),
+        twoFA: true,
+        bloodGroup: String(r.blood_group ?? "—"),
+        allergies: [],
+        contacts: [],
+        audit: [{ at: String(r.last_seen_at ?? r.created_at ?? new Date().toISOString()), action: `Signed in${r.method ? ` by ${String(r.method)}` : ""}` }],
+      };
+    };
+    const merge = (rows: Record<string, unknown>[]) =>
+      setUsers((prev) => {
+        const real = rows.map(toUser);
+        const ids = new Set(real.map((u) => u.id));
+        return [...real, ...prev.filter((u) => !ids.has(u.id))];
+      });
+    let cancelled = false;
+    void (async () => {
+      try {
+        // Older email sign-ups live in public.profiles; newer ones (email and phone) in public.app_users.
+        const prof = await supabase.from("profiles").select("id, role, full_name, phone, blood_group, created_at").limit(500);
+        if (!cancelled && Array.isArray(prof.data)) merge((prof.data as Record<string, unknown>[]).map((r) => ({ ...r, contact: r.phone ?? "", method: "email" })));
+        const { data } = await supabase.from("app_users").select("*").order("last_seen_at", { ascending: false }).limit(500);
+        if (!cancelled && Array.isArray(data)) merge(data as Record<string, unknown>[]);
+      } catch {
+        /* offline: sample directory only */
+      }
+    })();
+    const ch = supabase
+      .channel("admin-app-users")
+      .on("postgres_changes", { event: "*", schema: "public", table: "app_users" }, (payload) => {
+        if (payload.new && (payload.new as Record<string, unknown>).id) merge([payload.new as Record<string, unknown>]);
+      })
+      .subscribe();
+    return () => {
+      cancelled = true;
+      void supabase.removeChannel(ch);
+    };
+  }, []);
+
   /* ---------------------------- merge helper ---------------------------- */
   const upsertIncident = useCallback((incoming: Incident) => {
     setIncidents((prev) => {
