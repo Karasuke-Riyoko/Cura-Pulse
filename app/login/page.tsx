@@ -17,6 +17,8 @@ import {
   readSession,
   saveProfileRow,
   sendCode,
+  startGoogle,
+  userFromRedirect,
   verifyCode,
   writeSession,
 } from "@/lib/auth";
@@ -36,6 +38,7 @@ interface DocReview {
 }
 
 const ACCOUNTS_KEY = "curapulse_accounts";
+const PENDING_KEY = "curapulse_pending_signin";
 const APPS_KEY = "curapulse_doctor_applications";
 const COUNCILS = ["National Medical Commission (NMC)", "Delhi Medical Council", "Maharashtra Medical Council", "Karnataka Medical Council", "Tamil Nadu Medical Council", "West Bengal Medical Council", "Other State Medical Council"];
 
@@ -113,6 +116,50 @@ export default function LoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Came back from an emailed sign-in link: restore the form, then finish once state is applied.
+  const [resume, setResume] = useState<{ userId: string; meta?: Record<string, unknown> } | null>(null);
+  useEffect(() => {
+    void (async () => {
+      const r = await userFromRedirect();
+      if (!r) return;
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      if ("error" in r) {
+        setError(`${r.error} Request a new code.`);
+        return;
+      }
+      try {
+        const p = JSON.parse(window.localStorage.getItem(PENDING_KEY) || "null");
+        if (p) {
+          setTab(p.tab);
+          setMode(p.mode);
+          setStaffRole(p.staffRole);
+          staffInfo.current = p.staff ?? null;
+          setFirstName(p.firstName);
+          setSurname(p.surname);
+          setAge(p.age);
+          setSex(p.sex);
+          setMethod("email");
+          setContact(r.email || p.contact);
+        } else {
+          setMode("login");
+          setMethod("email");
+          setContact(r.email);
+        }
+      } catch {
+        setMode("login");
+        setMethod("email");
+        setContact(r.email);
+      }
+      setResume({ userId: r.userId, meta: r.meta });
+    })();
+  }, []);
+  useEffect(() => {
+    if (!resume) return;
+    setResume(null);
+    afterVerified(resume.userId, resume.meta);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resume]);
+
   useEffect(() => {
     if (resendIn <= 0) return;
     const t = setTimeout(() => setResendIn((n) => n - 1), 1000);
@@ -146,6 +193,12 @@ export default function LoginPage() {
     if (method === "phone" && phoneDigits(c).length < 10) return setError("Enter a 10-digit mobile number.");
     setError(null);
     setBusy(true);
+    try {
+      // Saved so an emailed sign-in link (instead of a code) can finish sign-up on return.
+      window.localStorage.setItem(PENDING_KEY, JSON.stringify({ tab, mode, staffRole, staff: staffInfo.current, firstName, surname, age, sex, method, contact: c }));
+    } catch {
+      /* ignore */
+    }
     const res = await sendCode(method, c, { first_name: firstName.trim(), surname: surname.trim(), age, sex, role });
     setBusy(false);
     if (!res.ok) return setError(res.error ?? "Could not send the code.");
@@ -176,24 +229,24 @@ export default function LoginPage() {
   });
 
   const checkCode = async () => {
-    if (code.replace(/\D/g, "").length !== 6) return setError("Enter the 6-digit code.");
+    const digits = code.replace(/\D/g, "").length;
+    if (digits < 6 || digits > 8) return setError("Enter the code from the email or SMS.");
     setError(null);
     setBusy(true);
     const res = await verifyCode(method, contact, code);
-    if (!res.ok || !res.userId) {
-      setBusy(false);
-      return setError(res.error ?? "That code is not right.");
-    }
-    let meta: Record<string, unknown> | undefined;
-    if (method === "email") {
-      try {
-        const { data } = await supabase.auth.getUser();
-        meta = data.user?.user_metadata ?? undefined;
-      } catch {
-        meta = undefined;
-      }
-    }
     setBusy(false);
+    if (!res.ok || !res.userId) return setError(res.error ?? "That code is not right.");
+    afterVerified(res.userId, res.meta);
+  };
+
+  /** Runs after a code (or an emailed sign-in link) proves the person owns the email/phone. */
+  const afterVerified = (userId: string, meta?: Record<string, unknown>) => {
+    const res = { userId };
+    try {
+      window.localStorage.removeItem(PENDING_KEY);
+    } catch {
+      /* ignore */
+    }
     verified.current = { userId: res.userId, real: method === "email" };
 
     if (tab === "staff" && staffInfo.current) {
@@ -329,6 +382,61 @@ export default function LoginPage() {
     setStep("pending");
   };
 
+  const signInWithGoogle = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      window.localStorage.setItem(PENDING_KEY, JSON.stringify({ tab, mode, staffRole, staff: staffInfo.current, firstName, surname, age, sex, method: "email", contact: "" }));
+    } catch {
+      /* ignore */
+    }
+    const r = await startGoogle();
+    // On success the browser leaves for Google; we only get here on an error.
+    setBusy(false);
+    if (r.error) setError(r.error);
+  };
+
+  const fillDemo = () => {
+    setError(null);
+    if (step === "staffCreds") {
+      setStaffId(staffRole === "admin" ? "admin01" : "support01");
+      setStaffPass(staffRole === "admin" ? "CuraAdmin@2026" : "CuraSupport@2026");
+      return;
+    }
+    if (step === "details") {
+      if (tab === "doctor") {
+        setFirstName("Meera");
+        setSurname("Iyer");
+        setAge("34");
+        setSex("Female");
+      } else {
+        setFirstName("Aarohi");
+        setSurname("Deshmukh");
+        setAge("24");
+        setSex("Female");
+      }
+      return;
+    }
+    if (step === "method") {
+      setMethod("phone");
+      setContact(tab === "doctor" ? "+91 98111 12222" : tab === "staff" ? "+91 98000 00001" : "+91 98101 23456");
+      return;
+    }
+    if (step === "code" && codeIsDemo) {
+      setCode(DEMO_PHONE_OTP);
+      return;
+    }
+    if (step === "professional") {
+      setQualification("MBBS, MD (General Medicine)");
+      setSpecialty("General Medicine");
+      setRegNo("DMC/R/2019/11873");
+      setCouncil("Delhi Medical Council");
+      setExperience("8");
+      setHospital("Bhagwan Mahavir Hospital, Pitampura");
+    }
+  };
+  const canFillDemo = step === "details" || step === "staffCreds" || step === "method" || step === "professional" || (step === "code" && codeIsDemo);
+
   const useDemoDoctor = () => {
     writeSession({ ...DEMO_DOCTOR, signedInAt: new Date().toISOString() });
     router.replace("/doctor");
@@ -446,6 +554,11 @@ export default function LoginPage() {
             )}
           </div>
 
+          {canFillDemo && (
+            <button type="button" onClick={fillDemo} className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-lav/60 px-3 py-1 text-[12.5px] font-semibold text-lav-ink hover:bg-lav">
+              <Sparkles className="h-3.5 w-3.5" /> Fill demo details
+            </button>
+          )}
           {error && (
             <Alert tone="crit" className="mb-4">
               {error}
@@ -550,7 +663,7 @@ export default function LoginPage() {
               <Field
                 label={method === "email" ? "Email address" : "Mobile number"}
                 htmlFor="contact"
-                help={method === "phone" ? `Demo mode: SMS isn't connected yet, so the code is ${DEMO_PHONE_OTP}.` : "We'll email you a 6-digit code."}
+                help={method === "phone" ? `Demo mode: SMS isn't connected yet, so the code is ${DEMO_PHONE_OTP}.` : "We'll email you a one-time code."}
               >
                 <input
                   id="contact"
@@ -567,6 +680,27 @@ export default function LoginPage() {
               <Button full loading={busy} onClick={requestCode}>
                 Send code
               </Button>
+              {tab !== "staff" && (
+                <>
+                  <div className="flex items-center gap-3 text-[12.5px] text-ink-soft">
+                    <span className="h-px flex-1 bg-line" /> or <span className="h-px flex-1 bg-line" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={signInWithGoogle}
+                    disabled={busy}
+                    className="flex h-12 w-full items-center justify-center gap-2.5 rounded-xl border-[1.5px] border-line-strong bg-white text-[15px] font-semibold text-ink hover:bg-canvas disabled:opacity-60"
+                  >
+                    <svg viewBox="0 0 48 48" className="h-5 w-5" aria-hidden>
+                      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+                      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+                      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+                      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+                    </svg>
+                    Continue with Google
+                  </button>
+                </>
+              )}
             </div>
           )}
 
@@ -579,7 +713,7 @@ export default function LoginPage() {
                   </>
                 ) : (
                   <>
-                    We emailed a 6-digit code to <b className="text-ink">{contact}</b>. Check spam if you don't see it.
+                    We emailed a code to <b className="text-ink">{contact}</b>. Check spam if you don't see it. If the email has a sign-in link instead, open it on this device.
                   </>
                 )}
               </p>
@@ -590,7 +724,7 @@ export default function LoginPage() {
                 autoFocus
                 placeholder="••••••"
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
                 onKeyDown={(e) => e.key === "Enter" && checkCode()}
                 className={cx(inputCls, "tabular text-center text-[24px] tracking-[0.5em]", error && inputErrCls)}
               />

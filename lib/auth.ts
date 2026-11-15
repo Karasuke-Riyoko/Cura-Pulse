@@ -71,7 +71,8 @@ export async function sendCode(method: "email" | "phone", contact: string, meta:
   try {
     const { error } = await supabase.auth.signInWithOtp({
       email: contact.trim().toLowerCase(),
-      options: { shouldCreateUser: true, data: meta },
+      // emailRedirectTo: if the email template still sends a link instead of a code, the link brings people back here.
+      options: { shouldCreateUser: true, data: meta, emailRedirectTo: `${window.location.origin}/login` },
     });
     if (error) return { ok: false, demo: false, error: friendly(error.message) };
     return { ok: true, demo: false };
@@ -81,7 +82,7 @@ export async function sendCode(method: "email" | "phone", contact: string, meta:
 }
 
 /** Checks the code. Returns the Supabase user id for email sign-ins. */
-export async function verifyCode(method: "email" | "phone", contact: string, code: string): Promise<{ ok: boolean; userId?: string; error?: string }> {
+export async function verifyCode(method: "email" | "phone", contact: string, code: string): Promise<{ ok: boolean; userId?: string; meta?: Record<string, unknown>; error?: string }> {
   const token = code.replace(/\D/g, "");
   if (method === "phone") {
     return token === DEMO_PHONE_OTP ? { ok: true, userId: `phone-${phoneDigits(contact)}` } : { ok: false, error: "That code is not right. Check it and try again." };
@@ -89,13 +90,40 @@ export async function verifyCode(method: "email" | "phone", contact: string, cod
   try {
     const { data, error } = await supabase.auth.verifyOtp({ email: contact.trim().toLowerCase(), token, type: "email" });
     if (error || !data.user) return { ok: false, error: friendly(error?.message ?? "Code could not be checked.") };
-    return { ok: true, userId: data.user.id };
+    return { ok: true, userId: data.user.id, meta: data.user.user_metadata ?? undefined };
   } catch (e) {
     return { ok: false, error: friendly(e instanceof Error ? e.message : String(e)) };
   }
 }
 
 /** Best-effort save of the profile row (table public.profiles). Never blocks sign-in. */
+/** Google sign-in through Supabase. Comes back to /login with #access_token, handled by userFromRedirect. */
+export async function startGoogle(): Promise<{ error?: string }> {
+  try {
+    const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: `${window.location.origin}/login` } });
+    if (error) return { error: /provider is not enabled|unsupported provider/i.test(error.message) ? "Google sign-in isn't turned on in Supabase yet (Authentication → Sign In / Providers → Google)." : friendly(error.message) };
+    return {};
+  } catch (e) {
+    return { error: friendly(e instanceof Error ? e.message : String(e)) };
+  }
+}
+
+/** If the email held a sign-in link instead of a code, Supabase sends people back with #access_token=... */
+export async function userFromRedirect(): Promise<{ userId: string; email: string; meta?: Record<string, unknown> } | { error: string } | null> {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const errDesc = hash.get("error_description");
+  if (errDesc) return { error: friendly(errDesc.replace(/\+/g, " ")) };
+  const token = hash.get("access_token");
+  if (!token) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) return { error: friendly(error?.message ?? "Sign-in link could not be checked.") };
+    return { userId: data.user.id, email: data.user.email ?? "", meta: data.user.user_metadata ?? undefined };
+  } catch (e) {
+    return { error: friendly(e instanceof Error ? e.message : String(e)) };
+  }
+}
+
 export async function saveProfileRow(s: Session, extra: Record<string, unknown> = {}) {
   if (s.method !== "email" || s.verifiedBy !== "real") return;
   try {

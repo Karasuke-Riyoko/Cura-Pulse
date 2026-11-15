@@ -1314,6 +1314,45 @@ export default function PatientPortal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [patientId]);
 
+  // Live updates for the current booking: doctor calls you in, or issues an e-prescription on their device.
+  useEffect(() => {
+    if (!booking) return;
+    const token = booking.token;
+    const docId = booking.docId;
+    const doc = DOCTORS.find((d) => d.id === docId);
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    try {
+      channel = supabase
+        .channel(`curapulse-booking-${token}`)
+        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "appointments", filter: `arrival_token=eq.${token}` }, (payload: { new: Record<string, unknown> }) => {
+          const st = String(payload.new?.status ?? "");
+          if (st === "In Consultation") {
+            showToast(`${doc?.name ?? "Your doctor"} is ready for you now (token ${token}).`, "ok", 6000);
+            sysMsg(`${doc?.name ?? "Your doctor"} has called token ${token} in.`, docId);
+          }
+        })
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "prescriptions", filter: `arrival_token=eq.${token}` }, (payload: { new: Record<string, unknown> }) => {
+          const r = payload.new ?? {};
+          const meds = Array.isArray(r.medicines) ? (r.medicines as Record<string, unknown>[]).map((m) => `${m.name ?? "Medicine"} ${m.dosage ?? ""}`.trim()).join(", ") : "";
+          setThreads((t) => ({
+            ...t,
+            [docId]: [
+              ...(t[docId] ?? []),
+              { id: `rx-${String(r.rx_hash ?? uid())}`, sender: "doctor", time: clock(), text: `E-prescription ${String(r.rx_hash ?? "")} issued${r.diagnosis ? ` for ${String(r.diagnosis)}` : ""}.${meds ? ` Medicines: ${meds}.` : ""} Show it at any pharmacy.` },
+            ],
+          }));
+          showToast(`New e-prescription from ${doc?.name ?? "your doctor"}. It's in your chat.`, "ok", 6000);
+        })
+        .subscribe();
+    } catch {
+      channel = null;
+    }
+    return () => {
+      if (channel) void supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booking?.token]);
+
   const scriptedReply = (text: string, doc: Doctor) => {
     setTyping(false);
     const reply = craftReply(text, doc);
@@ -1410,6 +1449,29 @@ export default function PatientPortal() {
       sysMsg(`Female chaperone nurse requested. Pass ${pass} will be checked at the exam room door.`, doc.id);
     }
     showToast(`Booked · Token ${token}`, "ok");
+    // Send the booking to the doctor's queue on any device.
+    void (async () => {
+      try {
+        await supabase.from("appointments").insert({
+          arrival_token: token,
+          patient_id: patientId || null,
+          patient_name: profile.name || "Patient",
+          age: Number(profile.age) || null,
+          gender: profile.gender || null,
+          blood_group: profile.bloodGroup || null,
+          allergies: profile.allergies,
+          chronic_illnesses: profile.conditions,
+          chief_complaint: symptoms.trim() || `Booked from the CuraPulse app (${apptMode === "video" ? "video visit" : "in person"})`,
+          slot: `${day.label}, ${apptSlot}`,
+          doctor_id: doc.id,
+          doctor_name: doc.name,
+          chaperone_requested: apptChaperone,
+          status: "Waiting",
+        });
+      } catch {
+        // Offline: booking stays on this device.
+      }
+    })();
     if (fromChat) later(() => pushCard("arrival", "system"), 600);
     else go("confirmed");
   };
